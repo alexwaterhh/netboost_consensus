@@ -1896,3 +1896,367 @@ nb_moduleEigengenes <-
 #         
 #         invisible(results)
 #     }
+
+
+#' Netboost Consensus clustering across multiple datasets.
+#'
+#' This function performs consensus network analysis across multiple datasets
+#' by calculating Topological Overlap Matrices (TOMs) for each dataset and 
+#' integrating them using min, max, or quantile methods, similar to WGCNA's 
+#' blockwiseConsensusModules. After integration, dynamic tree cutting is 
+#' performed to identify modules.
+#'
+#' @name netboost_consensus
+#' @param datan_list    List of data frames where rows correspond to samples 
+#'   and columns to features. All data frames should have the same features 
+#'   (columns) but can have different samples.
+#' @param stepno    Integer amount of boosting steps applied in the filtering
+#'   step for each dataset.
+#' @param filter_method    The following filtering methods are supported:
+#'   "boosting" (non-zero coefficients in likelihood based boosting),
+#'   "skip" (no filter), "kendall" (stats::cor.test),
+#'   "spearman" (stats::cor.test), "pearson" (stats::cor.test)
+#' @param until    Stop at index/column (if 0: iterate through all columns).
+#'   For testing purposes in large datasets.
+#' @param progress    Integer. If > 0, print progress after every X steps (
+#'   Progress might not be reported completely accurate due to parallel execution)
+#' @param mode    Integer. Mode (0: x86, 1: FMA, 2: AVX). Features are only
+#'   available if compiled accordingly and available on the hardware.
+#' @param soft_power    Vector of integers. Exponent of the transformation for
+#'   each dataset. Should have length equal to length(datan_list). Set
+#'   automatically based on the scale free topology criterion if NULL.
+#' @param consensus_method    Character string specifying the method to 
+#'   integrate TOMs across datasets. Options are "min" (minimum), "max" 
+#'   (maximum), or a quantile specification like "quantile.0.25" for the 
+#'   25th percentile, "quantile.0.5" for median, etc.
+#' @param max_singleton    Integer. The maximal singleton in the clustering.
+#'   Usually equals the number of features.
+#' @param qc_plot    Logical. Should plots be created?
+#' @param min_cluster_size  Integer. The minimum number of features in one
+#'   module.
+#' @param ME_diss_thres    Numeric. Module Eigengene Dissimilarity Threshold for
+#'   merging close modules.
+#' @param cores    Integer. Amount of CPU cores used (<=1 : sequential)
+#' @param scale    Logical. Should data be scaled and centered?
+#' @param method    A character string specifying the method to be used for
+#'   correlation coefficients.
+#' @param verbose    Additional diagnostic messages.
+#' @param n_pc        Number of principal components and variance explained
+#'   entries to be calculated. The number of returned variance explained
+#'   entries is currently 'min(n_pc,10)'. If given 'n_pc' is 
+#'   greater than 10, a warning is issued.
+#' @param robust_PCs	Should PCA be calculated on ranked data (Spearman PCA)?
+#'   Rotations will not correspond to original data if this is applied.
+#' @param nb_min_varExpl    Minimum proportion of variance explained for
+#'   returned module eigengenes. The number of PCs is capped at n_pc.
+#' @param reference_data    Integer. Index of the dataset in datan_list to use
+#'   for calculating module eigengenes. If NULL, uses the first dataset.
+#' @return dendros    A list of dendrograms. For each fully separate part of the
+#'   network an individual dendrogram.
+#' @return names    A vector of feature names.
+#' @return colors    A vector of numeric color coding in matching order of names
+#'   and module eigengene names (color = 3 -> variable in ME3).
+#' @return MEs    Aggregated module measures (Module eigengenes) calculated on
+#'   the reference dataset.
+#' @return var_explained    Proportion of variance explained per module
+#'   eigengene per principal component (max n_pc principal components are listed).
+#' @return rotation    Matrix of variable loadings divided by their singular
+#'   values. datan %*% rotation = MEs (with datan potentially scaled)
+#' @return consensus_TOM    The consensus topological overlap matrix across
+#'   all datasets.
+#' @return individual_filters    List of filter matrices for each dataset.
+#'
+#' @examples
+#' \dontrun{
+#' data('tcga_aml_meth_rna_chr18',  package='netboost')
+#' # Create two datasets (for example, split by samples)
+#' set.seed(123)
+#' idx1 <- sample(1:nrow(tcga_aml_meth_rna_chr18), 
+#'                size=floor(nrow(tcga_aml_meth_rna_chr18)/2))
+#' idx2 <- setdiff(1:nrow(tcga_aml_meth_rna_chr18), idx1)
+#' datan_list <- list(tcga_aml_meth_rna_chr18[idx1,],
+#'                    tcga_aml_meth_rna_chr18[idx2,])
+#' 
+#' results <- netboost_consensus(datan_list=datan_list, stepno=20L,
+#'    soft_power=c(3L, 3L), consensus_method="min",
+#'    min_cluster_size=10L, n_pc=2, scale=TRUE,
+#'    ME_diss_thres=0.25, qc_plot=TRUE)
+#' }
+#'
+#' @export
+netboost_consensus <-
+    function(datan_list = NULL,
+             stepno = 20L,
+             filter_method = c("boosting","skip",
+                               "kendall", "spearman", "pearson"),
+             until = 0L,
+             progress = 1000L,
+             mode = 2L,
+             soft_power = NULL,
+             consensus_method = c("min", "max", "quantile.0.25", "quantile.0.5", 
+                                  "quantile.0.75"),
+             max_singleton = NULL,
+             qc_plot = TRUE,
+             min_cluster_size = 2L,
+             ME_diss_thres = 0.25,
+             n_pc = 1,
+             robust_PCs = FALSE,
+             nb_min_varExpl = 0.5,
+             cores = as.integer(getOption("mc.cores", 2)),
+             scale = TRUE,
+             method = c("pearson", "kendall", "spearman"),
+             reference_data = NULL,
+             verbose = getOption("verbose")) {
+        
+        # Input validation
+        if (is.null(datan_list) || !is.list(datan_list))
+            stop("netboost_consensus: Error: datan_list must be a list of data.frames.")
+        
+        if (length(datan_list) < 2)
+            stop("netboost_consensus: Error: datan_list must contain at least 2 datasets.")
+        
+        for (i in seq_along(datan_list)) {
+            if (!is.data.frame(datan_list[[i]]))
+                stop(paste0("netboost_consensus: Error: Element ", i, 
+                            " of datan_list must be a data.frame."))
+        }
+        
+        # Check that all datasets have the same features
+        feature_names <- colnames(datan_list[[1]])
+        n_features <- ncol(datan_list[[1]])
+        
+        for (i in 2:length(datan_list)) {
+            if (ncol(datan_list[[i]]) != n_features)
+                stop(paste0("netboost_consensus: Error: All datasets must have ",
+                            "the same number of features. Dataset 1 has ", 
+                            n_features, " features, but dataset ", i, " has ",
+                            ncol(datan_list[[i]]), " features."))
+            
+            if (!all(colnames(datan_list[[i]]) == feature_names))
+                stop(paste0("netboost_consensus: Error: All datasets must have ",
+                            "the same feature names in the same order. ",
+                            "Dataset ", i, " has different feature names."))
+        }
+        
+        if (is.null(stepno) || !is.integer(stepno))
+            stop("netboost_consensus: Error: stepno must be an integer.")
+        
+        if (is.null(min_cluster_size) || !is.integer(min_cluster_size))
+            stop("netboost_consensus: Error: min_cluster_size must be an integer.")
+        
+        if (is.null(ME_diss_thres) || !is.numeric(ME_diss_thres))
+            stop("netboost_consensus: Error: ME_diss_thres must be numeric.")
+        
+        verbose <- as.logical(verbose)
+        
+        if (n_features > 5e+06) {
+            stop(
+                "A bug in sparse UPGMA currently prevents analyses",
+                " with more than 5 million features."
+            )
+        }
+        
+        if (is.null(max_singleton)) {
+            max_singleton <- n_features
+        }
+        
+        # Set reference dataset
+        if (is.null(reference_data)) {
+            reference_data <- 1L
+        } else {
+            if (reference_data < 1 || reference_data > length(datan_list))
+                stop(paste0("netboost_consensus: Error: reference_data must be ",
+                            "between 1 and ", length(datan_list), "."))
+        }
+        
+        # Parse consensus method
+        consensus_method <- consensus_method[1]
+        if (grepl("^quantile\\.", consensus_method)) {
+            quantile_value <- as.numeric(sub("^quantile\\.", "", consensus_method))
+            if (is.na(quantile_value) || quantile_value < 0 || quantile_value > 1)
+                stop("netboost_consensus: Error: quantile value must be between 0 and 1.")
+        }
+        
+        # Initialize parallelization of WGCNA package
+        if (cores > 1)
+            WGCNA::allowWGCNAThreads(nThreads = as.integer(cores))
+        
+        # Scale and center data if requested
+        if (scale) {
+            if (verbose) message("Netboost Consensus: Scaling and centering data.")
+            
+            for (i in seq_along(datan_list)) {
+                datan_list[[i]] <-
+                    as.data.frame(scale(datan_list[[i]], center = TRUE, scale = TRUE))
+            }
+        }
+        
+        # Set soft_power if not provided
+        if (is.null(soft_power)) {
+            soft_power <- rep(NA_integer_, length(datan_list))
+            
+            for (i in seq_along(datan_list)) {
+                if (verbose) {
+                    message(paste0("Netboost Consensus: Determining soft_power for dataset ", i))
+                }
+                
+                # Random subset for power estimation
+                random_features <-
+                    sample(n_features, min(c(10000, n_features)))
+                
+                # Call the network topology analysis function
+                sft <- WGCNA::pickSoftThreshold(datan_list[[i]][, random_features])
+                soft_power[i] <- sft[["powerEstimate"]]
+                
+                if (verbose) {
+                    message(
+                        paste0(
+                            "Netboost Consensus: soft_power for dataset ", i,
+                            " was set to ", soft_power[i],
+                            " based on the scale free topology criterion."
+                        )
+                    )
+                }
+            }
+        } else {
+            # Validate soft_power
+            if (length(soft_power) != length(datan_list))
+                stop(paste0("netboost_consensus: Error: soft_power must have length ",
+                            "equal to length(datan_list) = ", length(datan_list), 
+                            ". Received length ", length(soft_power), "."))
+        }
+        
+        # Step 1: Calculate filter and adjacency for each dataset
+        if (verbose) message("Netboost Consensus: Starting filter and TOM calculation for each dataset.")
+        
+        filter_list <- list()
+        adjacency_list <- list()
+        
+        for (i in seq_along(datan_list)) {
+            if (verbose) message(paste0("Netboost Consensus: Processing dataset ", i, 
+                                         " of ", length(datan_list)))
+            
+            # Filter step
+            if (verbose) message(paste0("  - Filtering dataset ", i))
+            filter_list[[i]] <-
+                nb_filter(
+                    datan = datan_list[[i]],
+                    stepno = stepno,
+                    until = until,
+                    filter_method = filter_method,
+                    progress = progress,
+                    cores = cores,
+                    mode = mode,
+                    verbose = verbose
+                )
+            
+            # Calculate adjacency
+            if (verbose) message(paste0("  - Calculating adjacency for dataset ", i))
+            adjacency_list[[i]] <-
+                calculate_adjacency(
+                    datan = datan_list[[i]],
+                    filter = filter_list[[i]],
+                    soft_power = soft_power[i],
+                    method = method
+                )
+        }
+        
+        # Step 2: Create a consensus filter (union of all edges)
+        if (verbose) message("Netboost Consensus: Creating consensus filter (union of edges).")
+        
+        # Combine all filters
+        all_filters <- do.call(rbind, filter_list)
+        # Get unique edges
+        consensus_filter <- unique(all_filters)
+        # Sort for consistency
+        consensus_filter <- consensus_filter[order(consensus_filter[,1], 
+                                                     consensus_filter[,2]), , 
+                                              drop = FALSE]
+        
+        if (verbose) {
+            message(paste0("Netboost Consensus: Total unique edges in consensus filter: ",
+                           nrow(consensus_filter)))
+            for (i in seq_along(filter_list)) {
+                message(paste0("  - Dataset ", i, " had ", nrow(filter_list[[i]]), 
+                               " edges"))
+            }
+        }
+        
+        # Step 3: Calculate TOM for each dataset using consensus filter
+        if (verbose) message("Netboost Consensus: Calculating TOM for each dataset.")
+        
+        TOM_list <- list()
+        
+        for (i in seq_along(datan_list)) {
+            if (verbose) message(paste0("  - Calculating TOM for dataset ", i))
+            
+            # Calculate adjacency for consensus filter edges
+            consensus_adjacency <-
+                calculate_adjacency(
+                    datan = datan_list[[i]],
+                    filter = consensus_filter,
+                    soft_power = soft_power[i],
+                    method = method
+                )
+            
+            # Calculate TOM distances
+            TOM_list[[i]] <- cpp_dist_tom(consensus_filter, consensus_adjacency)
+        }
+        
+        # Step 4: Integrate TOMs using the specified consensus method
+        if (verbose) message(paste0("Netboost Consensus: Integrating TOMs using method: ", 
+                                     consensus_method))
+        
+        # Convert list of TOM vectors to matrix for easier computation
+        TOM_matrix <- do.call(cbind, TOM_list)
+        
+        # Apply consensus method
+        if (consensus_method == "min") {
+            consensus_dist <- apply(TOM_matrix, 1, min)
+        } else if (consensus_method == "max") {
+            consensus_dist <- apply(TOM_matrix, 1, max)
+        } else if (grepl("^quantile\\.", consensus_method)) {
+            quantile_value <- as.numeric(sub("^quantile\\.", "", consensus_method))
+            consensus_dist <- apply(TOM_matrix, 1, quantile, probs = quantile_value)
+        } else {
+            stop(paste0("netboost_consensus: Error: Unknown consensus_method: ", 
+                        consensus_method))
+        }
+        
+        if (verbose) message("Netboost Consensus: Finished TOM integration.")
+        
+        # Step 5: Perform clustering on consensus distances
+        if (verbose) message("Netboost Consensus: Initialising clustering step.")
+        
+        results <-
+            nb_clust(
+                datan = datan_list[[reference_data]],
+                filter = consensus_filter,
+                dist = consensus_dist,
+                min_cluster_size = min_cluster_size,
+                ME_diss_thres = ME_diss_thres,
+                n_pc = n_pc,
+                robust_PCs = robust_PCs,
+                nb_min_varExpl = nb_min_varExpl,
+                max_singleton = max_singleton,
+                cores = cores,
+                method = method,
+                qc_plot = qc_plot
+            )
+        
+        # Add consensus-specific information to results
+        results$consensus_filter <- consensus_filter
+        results$consensus_TOM <- consensus_dist
+        results$individual_filters <- filter_list
+        results$soft_power <- soft_power
+        results$consensus_method <- consensus_method
+        results$n_datasets <- length(datan_list)
+        results$reference_data <- reference_data
+        
+        if (verbose) {
+            message("Netboost Consensus: Finished clustering step.")
+            message("Netboost Consensus: Finished Netboost Consensus.")
+        }
+        
+        invisible(results)
+    }

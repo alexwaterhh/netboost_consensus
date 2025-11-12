@@ -2226,12 +2226,25 @@ netboost_consensus <-
         if (verbose) {
             message(paste0("  - Total unique edges across all datasets: ",
                            nrow(consensus_filter)))
-            
+
             # Calculate overlap statistics
             n_edges <- sapply(filter_list, nrow)
+            overlap_count <- sum(n_edges) - nrow(consensus_filter)
             message(paste0("  - Edge overlap: ", 
-                           sum(n_edges) - nrow(consensus_filter), 
+                           overlap_count, 
                            " edges appear in multiple datasets"))
+
+            # Print first 5 overlapping edges (gene1 gene2)
+            # Create edge keys for each dataset (undirected)
+            edge_keys <- lapply(filter_with_names, function(df) paste(pmin(df$feature1, df$feature2), pmax(df$feature1, df$feature2), sep=" "))
+            # Find intersection
+            shared_edges <- Reduce(intersect, edge_keys)
+            if (length(shared_edges) > 0) {
+                message("  - First 5 overlapping edges (gene1 gene2):")
+                print(head(shared_edges, 5))
+            } else {
+                message("  - No overlapping edges found.")
+            }
         }
         
         
@@ -2257,9 +2270,9 @@ netboost_consensus <-
         for (i in 1:nrow(consensus_filter)) {
             # Create edge key using feature names from reference dataset
             edge_key <- paste(ref_feature_names[consensus_filter[i,1]], 
-                            ref_feature_names[consensus_filter[i,2]], 
-                            sep="_")
-            
+                              ref_feature_names[consensus_filter[i,2]], 
+                              sep="_")
+
             # Collect TOM values from datasets that have this edge
             tom_values <- numeric(0)
             for (j in seq_along(datan_list)) {
@@ -2267,9 +2280,9 @@ netboost_consensus <-
                     tom_values <- c(tom_values, TOM_by_edge[[j]][edge_key])
                 }
             }
-            
-            # Apply consensus method
-            if (length(tom_values) > 0) {
+
+            # Only update if edge is shared (appears in 2+ datasets)
+            if (length(tom_values) > 1) {
                 if (consensus_method == "min") {
                     consensus_dist[i] <- min(tom_values)
                 } else if (consensus_method == "max") {
@@ -2279,8 +2292,8 @@ netboost_consensus <-
                     consensus_dist[i] <- quantile(tom_values, probs = quantile_value)
                 }
             } else {
-                # Edge not in any dataset (shouldn't happen, but handle it)
-                consensus_dist[i] <- NA
+                # Edge is unique to one dataset, set to 0 (or NA if preferred)
+                consensus_dist[i] <- 0
             }
         }
         

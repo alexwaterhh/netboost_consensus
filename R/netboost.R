@@ -2252,47 +2252,54 @@ netboost_consensus <-
         if (verbose) message(paste0("Netboost Consensus: Integrating TOMs using method: ", 
                                      consensus_method))
         
-        # Create a lookup for each dataset's TOM values by edge (using feature names)
-        TOM_by_edge <- list()
-        for (i in seq_along(datan_list)) {
+        # Efficient TOM integration: only process overlapping edges
+        # Create undirected edge keys for each dataset
+        edge_keys <- lapply(filter_with_names, function(df) paste(pmin(df$feature1, df$feature2), pmax(df$feature1, df$feature2), sep="_") )
+        # Find overlapping edges (present in 2+ datasets)
+        all_edge_keys <- unlist(edge_keys)
+        edge_table <- table(all_edge_keys)
+        shared_edge_keys <- names(edge_table)[edge_table > 1]
+
+        # Create lookup for TOM values by edge for each dataset
+        TOM_by_edge <- lapply(seq_along(datan_list), function(i) {
             feature_names <- colnames(datan_list[[i]])
-            # Create edge keys using feature names
-            edge_key <- paste(feature_names[filter_list[[i]][,1]], 
-                            feature_names[filter_list[[i]][,2]], 
-                            sep="_")
-            TOM_by_edge[[i]] <- setNames(TOM_list[[i]], edge_key)
-        }
-        
-        # For each edge in consensus filter, collect TOM values from all datasets
+            edge_key <- paste(pmin(filter_with_names[[i]]$feature1, filter_with_names[[i]]$feature2),
+                              pmax(filter_with_names[[i]]$feature1, filter_with_names[[i]]$feature2), sep="_")
+            setNames(TOM_list[[i]], edge_key)
+        })
+
+        # Prepare consensus TOM vector (same length as consensus_filter)
         consensus_dist <- numeric(nrow(consensus_filter))
         ref_feature_names <- colnames(datan_list[[reference_data]])
-        
-        for (i in 1:nrow(consensus_filter)) {
-            # Create edge key using feature names from reference dataset
-            edge_key <- paste(ref_feature_names[consensus_filter[i,1]], 
-                              ref_feature_names[consensus_filter[i,2]], 
-                              sep="_")
 
-            # Collect TOM values from datasets that have this edge
-            tom_values <- numeric(0)
-            for (j in seq_along(datan_list)) {
-                if (edge_key %in% names(TOM_by_edge[[j]])) {
-                    tom_values <- c(tom_values, TOM_by_edge[[j]][edge_key])
+        # Create edge keys for consensus_filter
+        consensus_edge_keys <- paste(pmin(ref_feature_names[consensus_filter[,1]], ref_feature_names[consensus_filter[,2]]),
+                                    pmax(ref_feature_names[consensus_filter[,1]], ref_feature_names[consensus_filter[,2]]), sep="_")
+
+        # For each edge in consensus_filter, only process if it's overlapping
+        for (i in seq_along(consensus_edge_keys)) {
+            edge_key <- consensus_edge_keys[i]
+            if (edge_key %in% shared_edge_keys) {
+                # Collect TOM values from all datasets that have this edge
+                tom_values <- numeric(0)
+                for (j in seq_along(TOM_by_edge)) {
+                    if (edge_key %in% names(TOM_by_edge[[j]])) {
+                        tom_values <- c(tom_values, TOM_by_edge[[j]][edge_key])
+                    }
                 }
-            }
-
-            # Only update if edge is shared (appears in 2+ datasets)
-            if (length(tom_values) > 1) {
-                if (consensus_method == "min") {
-                    consensus_dist[i] <- min(tom_values)
-                } else if (consensus_method == "max") {
-                    consensus_dist[i] <- max(tom_values)
-                } else if (grepl("^quantile\\.", consensus_method)) {
-                    quantile_value <- as.numeric(sub("^quantile\\.", "", consensus_method))
-                    consensus_dist[i] <- quantile(tom_values, probs = quantile_value)
+                # Apply consensus method
+                if (length(tom_values) > 1) {
+                    if (consensus_method == "min") {
+                        consensus_dist[i] <- min(tom_values)
+                    } else if (consensus_method == "max") {
+                        consensus_dist[i] <- max(tom_values)
+                    } else if (grepl("^quantile\\.", consensus_method)) {
+                        quantile_value <- as.numeric(sub("^quantile\\.", "", consensus_method))
+                        consensus_dist[i] <- quantile(tom_values, probs = quantile_value)
+                    }
                 }
             } else {
-                # Edge is unique to one dataset, set to 0 (or NA if preferred)
+                # Not overlapping, set to 0
                 consensus_dist[i] <- 0
             }
         }

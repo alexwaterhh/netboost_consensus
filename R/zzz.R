@@ -24,13 +24,13 @@
 #' @importFrom utils data packageDescription read.table write.table
 #' @importFrom methods is
 #'
-#' @useDynLib netboost
+#' @useDynLib netboostConsensus
 #'
 #' @examples 
 #' \dontrun{nb_example()}
 #' @return none
 #' @param libname Path to R installation (base package dir)
-#' @param pkgname Package name (should be "netboost")
+#' @param pkgname Package name (should be "netboostConsensus")
 .onAttach <- function(libname, pkgname) {
     desc <- packageDescription(pkgname)
 

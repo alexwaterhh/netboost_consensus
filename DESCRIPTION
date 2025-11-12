@@ -1,8 +1,8 @@
-Package: netboost
+Package: netboostConsensus
 Type: Package
-Title: Network Analysis Supported by Boosting
-Version: 1.1.4
-Date: 2019-08-06
+Title: Network Analysis Supported by Boosting with Consensus Module Detection
+Version: 1.2.0
+Date: 2025-11-12
 Authors@R: c(person("Pascal", "Schlosser", role = c("aut", "cre"),
                     email = "pascal.schlosser@uniklinik-freiburg.de"),
              person("Jochen", "Knaus", role = c("aut", "ctb"),

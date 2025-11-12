@@ -1964,7 +1964,15 @@ nb_moduleEigengenes <-
 #'   values. datan %*% rotation = MEs (with datan potentially scaled)
 #' @return consensus_TOM    The consensus topological overlap matrix across
 #'   all datasets.
+#' @return consensus_filter    The consensus filter matrix across all datasets.
 #' @return individual_filters    List of filter matrices for each dataset.
+#' @return ME_all_datasets    List of module eigengenes, loadings, and variance
+#'   explained for each dataset. Loadings are sign-corrected to align with
+#'   mean module expression.
+#' @return loading_correlations    List of correlation matrices showing the
+#'   correlation of loadings between datasets for each module.
+#' @return sign_flipped_count    List of matrices showing the number of features
+#'   with opposite signs in loadings between datasets for each module.
 #'
 #' @examples
 #' \dontrun{
@@ -1981,6 +1989,10 @@ nb_moduleEigengenes <-
 #'    soft_power=c(3L, 3L), consensus_method="min",
 #'    min_cluster_size=10L, n_pc=2, scale=TRUE,
 #'    ME_diss_thres=0.25, qc_plot=TRUE)
+#'    
+#' # Examine cross-dataset loading correlations
+#' results$loading_correlations
+#' results$sign_flipped_count
 #' }
 #'
 #' @export
@@ -2225,6 +2237,22 @@ netboost_consensus <-
         
         if (verbose) message("Netboost Consensus: Finished TOM integration.")
         
+        # Convert consensus distance vector to matrix
+        n_features <- ncol(datan_list[[1]])
+        consensus_TOM_matrix <- matrix(0, nrow = n_features, ncol = n_features)
+        rownames(consensus_TOM_matrix) <- colnames(datan_list[[1]])
+        colnames(consensus_TOM_matrix) <- colnames(datan_list[[1]])
+        
+        # Fill in the matrix with consensus distances
+        for (i in 1:nrow(consensus_filter)) {
+            idx1 <- consensus_filter[i, 1]
+            idx2 <- consensus_filter[i, 2]
+            consensus_TOM_matrix[idx1, idx2] <- consensus_dist[i]
+            consensus_TOM_matrix[idx2, idx1] <- consensus_dist[i]  # Symmetric
+        }
+        # Diagonal should be 0 (distance to self)
+        diag(consensus_TOM_matrix) <- 0
+        
         # Step 5: Perform clustering on consensus distances
         if (verbose) message("Netboost Consensus: Initialising clustering step.")
         
@@ -2244,18 +2272,192 @@ netboost_consensus <-
                 qc_plot = qc_plot
             )
         
+        # Step 6: Calculate module eigengenes for all datasets with sign correction
+        if (verbose) message("Netboost Consensus: Calculating module eigengenes across all datasets.")
+        
+        # Get module assignments
+        module_colors <- results$colors
+        unique_modules <- sort(unique(module_colors))
+        unique_modules <- unique_modules[unique_modules != 0]  # Exclude background
+        
+        # Initialize storage for cross-dataset module eigengene statistics
+        ME_list <- list()
+        loading_correlations <- list()
+        sign_flipped_count <- list()
+        
+        for (i in seq_along(datan_list)) {
+            if (verbose) message(paste0("  - Computing MEs for dataset ", i))
+            
+            # Scale data if needed
+            if (scale) {
+                datan_scaled <- as.data.frame(scale(datan_list[[i]], center = TRUE, scale = TRUE))
+            } else {
+                datan_scaled <- datan_list[[i]]
+            }
+            
+            # Calculate module eigengenes for this dataset
+            ME_result <- nb_moduleEigengenes(
+                expr = datan_scaled,
+                colors = module_colors,
+                n_pc = n_pc,
+                robust = robust_PCs,
+                nb_min_varExpl = nb_min_varExpl
+            )
+            
+            # Store eigengenes and rotation (loadings)
+            ME_list[[i]] <- list(
+                eigengenes = ME_result$nb_eigengenes,
+                rotation = ME_result$rotation,
+                var_explained = ME_result$var_explained
+            )
+            
+            # Sign correction: flip if eigengene doesn't correlate positively with mean expression
+            for (mod in unique_modules) {
+                mod_features <- names(module_colors[module_colors == mod])
+                
+                if (length(mod_features) > 0) {
+                    # Get module data
+                    mod_data <- datan_scaled[, mod_features, drop = FALSE]
+                    
+                    # Calculate mean expression
+                    mean_expr <- rowMeans(mod_data, na.rm = TRUE)
+                    
+                    # Get eigengene columns for this module
+                    me_cols <- grep(paste0("^ME", mod, "_pc"), 
+                                    colnames(ME_list[[i]]$eigengenes), 
+                                    value = TRUE)
+                    
+                    if (length(me_cols) > 0) {
+                        # Check first PC correlation with mean expression
+                        me_pc1 <- ME_list[[i]]$eigengenes[, me_cols[1]]
+                        cor_with_mean <- cor(me_pc1, mean_expr, use = "pairwise.complete.obs")
+                        
+                        # Flip sign if negative correlation
+                        if (!is.na(cor_with_mean) && cor_with_mean < 0) {
+                            for (me_col in me_cols) {
+                                ME_list[[i]]$eigengenes[, me_col] <- 
+                                    -ME_list[[i]]$eigengenes[, me_col]
+                            }
+                            # Also flip loadings
+                            loading_cols <- grep(paste0("^ME", mod, "_pc"), 
+                                                colnames(ME_list[[i]]$rotation[[mod]]), 
+                                                value = TRUE)
+                            if (length(loading_cols) > 0) {
+                                ME_list[[i]]$rotation[[mod]][, loading_cols] <- 
+                                    -ME_list[[i]]$rotation[[mod]][, loading_cols]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Step 7: Calculate loading correlations between datasets
+        if (verbose) message("Netboost Consensus: Calculating cross-dataset loading correlations.")
+        
+        for (mod in unique_modules) {
+            mod_features <- names(module_colors[module_colors == mod])
+            
+            if (length(mod_features) > 1) {
+                # Initialize storage for this module
+                loading_correlations[[as.character(mod)]] <- matrix(
+                    NA, 
+                    nrow = length(datan_list), 
+                    ncol = length(datan_list),
+                    dimnames = list(
+                        paste0("Dataset", 1:length(datan_list)),
+                        paste0("Dataset", 1:length(datan_list))
+                    )
+                )
+                
+                sign_flipped <- matrix(
+                    0, 
+                    nrow = length(datan_list), 
+                    ncol = length(datan_list),
+                    dimnames = list(
+                        paste0("Dataset", 1:length(datan_list)),
+                        paste0("Dataset", 1:length(datan_list))
+                    )
+                )
+                
+                # Compare loadings between all pairs of datasets
+                for (i in 1:(length(datan_list)-1)) {
+                    for (j in (i+1):length(datan_list)) {
+                        # Get loadings for first PC of this module
+                        if (!is.null(ME_list[[i]]$rotation[[mod]]) && 
+                            !is.null(ME_list[[j]]$rotation[[mod]])) {
+                            
+                            loading_col_i <- grep(paste0("^ME", mod, "_pc1$"), 
+                                                 colnames(ME_list[[i]]$rotation[[mod]]), 
+                                                 value = TRUE)
+                            loading_col_j <- grep(paste0("^ME", mod, "_pc1$"), 
+                                                 colnames(ME_list[[j]]$rotation[[mod]]), 
+                                                 value = TRUE)
+                            
+                            if (length(loading_col_i) > 0 && length(loading_col_j) > 0) {
+                                loadings_i <- ME_list[[i]]$rotation[[mod]][, loading_col_i]
+                                loadings_j <- ME_list[[j]]$rotation[[mod]][, loading_col_j]
+                                
+                                # Calculate correlation
+                                cor_val <- cor(loadings_i, loadings_j, use = "pairwise.complete.obs")
+                                loading_correlations[[as.character(mod)]][i, j] <- cor_val
+                                loading_correlations[[as.character(mod)]][j, i] <- cor_val
+                                
+                                # Count sign-flipped features
+                                sign_flip_count <- sum(sign(loadings_i) != sign(loadings_j), na.rm = TRUE)
+                                sign_flipped[i, j] <- sign_flip_count
+                                sign_flipped[j, i] <- sign_flip_count
+                            }
+                        }
+                    }
+                    # Diagonal is 1 (self-correlation)
+                    loading_correlations[[as.character(mod)]][i, i] <- 1.0
+                }
+                loading_correlations[[as.character(mod)]][length(datan_list), length(datan_list)] <- 1.0
+                
+                sign_flipped_count[[as.character(mod)]] <- sign_flipped
+            }
+        }
+        
         # Add consensus-specific information to results
         results$consensus_filter <- consensus_filter
-        results$consensus_TOM <- consensus_dist
+        results$consensus_TOM <- consensus_TOM_matrix
         results$individual_filters <- filter_list
         results$soft_power <- soft_power
         results$consensus_method <- consensus_method
         results$n_datasets <- length(datan_list)
         results$reference_data <- reference_data
+        results$ME_all_datasets <- ME_list
+        results$loading_correlations <- loading_correlations
+        results$sign_flipped_count <- sign_flipped_count
         
         if (verbose) {
             message("Netboost Consensus: Finished clustering step.")
-            message("Netboost Consensus: Finished Netboost Consensus.")
+            
+            # Print summary of loading correlations
+            message("\nNetboost Consensus: Cross-dataset loading correlation summary:")
+            for (mod in names(loading_correlations)) {
+                if (!is.null(loading_correlations[[mod]])) {
+                    cor_mat <- loading_correlations[[mod]]
+                    cor_vals <- cor_mat[upper.tri(cor_mat)]
+                    if (length(cor_vals) > 0) {
+                        message(sprintf("  Module %s: mean correlation = %.3f (range: %.3f to %.3f)",
+                                      mod, mean(cor_vals, na.rm = TRUE), 
+                                      min(cor_vals, na.rm = TRUE), 
+                                      max(cor_vals, na.rm = TRUE)))
+                        
+                        # Report sign flips
+                        flip_mat <- sign_flipped_count[[mod]]
+                        flip_vals <- flip_mat[upper.tri(flip_mat)]
+                        if (length(flip_vals) > 0 && sum(flip_vals) > 0) {
+                            message(sprintf("    Sign-flipped features: mean = %.1f (range: %d to %d)",
+                                          mean(flip_vals), min(flip_vals), max(flip_vals)))
+                        }
+                    }
+                }
+            }
+            
+            message("\nNetboost Consensus: Finished Netboost Consensus.")
         }
         
         invisible(results)

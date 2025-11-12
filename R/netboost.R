@@ -2173,66 +2173,81 @@ netboost_consensus <-
                 )
         }
         
-        # Step 2: Create a consensus filter (union of all edges)
-        if (verbose) message("Netboost Consensus: Creating consensus filter (union of edges).")
+        # Step 2: Calculate TOM for each dataset using its own filter
+        if (verbose) message("Netboost Consensus: Calculating TOM for each dataset independently.")
         
-        # Combine all filters
+        TOM_list <- list()
+        
+        for (i in seq_along(datan_list)) {
+            if (verbose) {
+                message(paste0("  - Calculating TOM for dataset ", i, 
+                               " (", nrow(filter_list[[i]]), " edges)"))
+            }
+            
+            # Calculate TOM distances using dataset's own filter
+            TOM_list[[i]] <- nb_dist(
+                datan = datan_list[[i]],
+                filter = filter_list[[i]],
+                soft_power = soft_power[i],
+                method = method,
+                cores = cores
+            )
+        }
+        
+        # Step 3: Create unified edge list (union of all edges)
+        if (verbose) message("Netboost Consensus: Creating unified edge list.")
+        
         all_filters <- do.call(rbind, filter_list)
-        # Get unique edges
         consensus_filter <- unique(all_filters)
-        # Sort for consistency
         consensus_filter <- consensus_filter[order(consensus_filter[,1], 
                                                      consensus_filter[,2]), , 
                                               drop = FALSE]
         
         if (verbose) {
-            message(paste0("Netboost Consensus: Total unique edges in consensus filter: ",
+            message(paste0("  - Total unique edges across all datasets: ",
                            nrow(consensus_filter)))
-            for (i in seq_along(filter_list)) {
-                message(paste0("  - Dataset ", i, " had ", nrow(filter_list[[i]]), 
-                               " edges"))
-            }
         }
         
-        # Step 3: Calculate TOM for each dataset using consensus filter
-        if (verbose) message("Netboost Consensus: Calculating TOM for each dataset.")
         
-        TOM_list <- list()
-        
-        for (i in seq_along(datan_list)) {
-            if (verbose) message(paste0("  - Calculating TOM for dataset ", i))
-            
-            # Calculate adjacency for consensus filter edges
-            consensus_adjacency <-
-                calculate_adjacency(
-                    datan = datan_list[[i]],
-                    filter = consensus_filter,
-                    soft_power = soft_power[i],
-                    method = method
-                )
-            
-            # Calculate TOM distances
-            TOM_list[[i]] <- cpp_dist_tom(consensus_filter, consensus_adjacency)
-        }
-        
-        # Step 4: Integrate TOMs using the specified consensus method
+        # Step 4: Merge TOMs across datasets using consensus method
         if (verbose) message(paste0("Netboost Consensus: Integrating TOMs using method: ", 
                                      consensus_method))
         
-        # Convert list of TOM vectors to matrix for easier computation
-        TOM_matrix <- do.call(cbind, TOM_list)
+        # Create a lookup for each dataset's TOM values by edge
+        TOM_by_edge <- list()
+        for (i in seq_along(datan_list)) {
+            edge_key <- paste(filter_list[[i]][,1], filter_list[[i]][,2], sep="_")
+            TOM_by_edge[[i]] <- setNames(TOM_list[[i]], edge_key)
+        }
         
-        # Apply consensus method
-        if (consensus_method == "min") {
-            consensus_dist <- apply(TOM_matrix, 1, min)
-        } else if (consensus_method == "max") {
-            consensus_dist <- apply(TOM_matrix, 1, max)
-        } else if (grepl("^quantile\\.", consensus_method)) {
-            quantile_value <- as.numeric(sub("^quantile\\.", "", consensus_method))
-            consensus_dist <- apply(TOM_matrix, 1, quantile, probs = quantile_value)
-        } else {
-            stop(paste0("netboost_consensus: Error: Unknown consensus_method: ", 
-                        consensus_method))
+        # For each edge in consensus filter, collect TOM values from all datasets
+        consensus_dist <- numeric(nrow(consensus_filter))
+        
+        for (i in 1:nrow(consensus_filter)) {
+            edge_key <- paste(consensus_filter[i,1], consensus_filter[i,2], sep="_")
+            
+            # Collect TOM values from datasets that have this edge
+            tom_values <- numeric(0)
+            for (j in seq_along(datan_list)) {
+                if (edge_key %in% names(TOM_by_edge[[j]])) {
+                    tom_values <- c(tom_values, TOM_by_edge[[j]][edge_key])
+                }
+            }
+            
+            # Apply consensus method
+            if (length(tom_values) > 0) {
+                if (consensus_method == "min") {
+                    consensus_dist[i] <- min(tom_values)
+                } else if (consensus_method == "max") {
+                    consensus_dist[i] <- max(tom_values)
+                } else if (grepl("^quantile\\.", consensus_method)) {
+                    quantile_value <- as.numeric(sub("^quantile\\.", "", consensus_method))
+                    consensus_dist[i] <- quantile(tom_values, probs = quantile_value)
+                }
+            } else {
+                # Edge not in any dataset (shouldn't happen, but handle it)
+                consensus_dist[i] <- NA
+            }
         }
         
         if (verbose) message("Netboost Consensus: Finished TOM integration.")

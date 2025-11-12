@@ -1,0 +1,343 @@
+---
+title: "Netboost Consensus Clustering"
+author: "Package Developers"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Netboost Consensus Clustering}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 10,
+  fig.height = 8
+)
+```
+
+# Introduction
+
+The `netboost_consensus` function extends netboost's clustering capabilities to perform consensus network analysis across multiple datasets. This approach is particularly useful when you have:
+
+- The same features measured in different conditions or tissues
+- Multiple batches or cohorts of samples
+- Different omics layers (e.g., methylation and expression)
+- Time series or longitudinal data
+
+# Basic Workflow
+
+## Load Required Packages
+
+```{r load_packages, message=FALSE}
+library(netboost)
+```
+
+## Prepare Data
+
+For demonstration, we'll split the example dataset into two groups:
+
+```{r prepare_data}
+# Load example data
+data('tcga_aml_meth_rna_chr18', package='netboost')
+
+# Create two datasets by splitting samples
+set.seed(123)
+n_samples <- nrow(tcga_aml_meth_rna_chr18)
+idx1 <- sample(1:n_samples, size=floor(n_samples/2))
+idx2 <- setdiff(1:n_samples, idx1)
+
+datan_list <- list(
+    cohort1 = tcga_aml_meth_rna_chr18[idx1, ],
+    cohort2 = tcga_aml_meth_rna_chr18[idx2, ]
+)
+
+cat("Cohort 1:", nrow(datan_list[[1]]), "samples,", 
+    ncol(datan_list[[1]]), "features\n")
+cat("Cohort 2:", nrow(datan_list[[2]]), "samples,", 
+    ncol(datan_list[[2]]), "features\n")
+```
+
+## Run Consensus Clustering
+
+```{r run_consensus, message=TRUE}
+# Run with minimum integration (conservative)
+results <- netboost_consensus(
+    datan_list = datan_list,
+    stepno = 20L,
+    soft_power = c(3L, 3L),
+    consensus_method = "min",
+    min_cluster_size = 10L,
+    n_pc = 2,
+    scale = TRUE,
+    ME_diss_thres = 0.25,
+    qc_plot = TRUE,
+    verbose = TRUE
+)
+```
+
+## Examine Results
+
+```{r examine_results}
+# Number of modules
+n_modules <- length(unique(results$colors))
+cat("Number of modules identified:", n_modules, "\n\n")
+
+# Module sizes
+cat("Module sizes:\n")
+print(table(results$colors))
+
+# Module eigengenes
+cat("\nModule eigengene dimensions:", dim(results$MEs), "\n")
+
+# Consensus information
+cat("\nNumber of datasets analyzed:", results$n_datasets, "\n")
+cat("Consensus method:", results$consensus_method, "\n")
+cat("Soft powers used:", results$soft_power, "\n")
+```
+
+# Comparing Integration Methods
+
+Different integration methods can lead to different module structures:
+
+```{r compare_methods, eval=FALSE}
+# Conservative: minimum
+results_min <- netboost_consensus(
+    datan_list = datan_list,
+    consensus_method = "min",
+    soft_power = c(3L, 3L),
+    qc_plot = FALSE
+)
+
+# Balanced: median
+results_median <- netboost_consensus(
+    datan_list = datan_list,
+    consensus_method = "quantile.0.5",
+    soft_power = c(3L, 3L),
+    qc_plot = FALSE
+)
+
+# Liberal: maximum
+results_max <- netboost_consensus(
+    datan_list = datan_list,
+    consensus_method = "max",
+    soft_power = c(3L, 3L),
+    qc_plot = FALSE
+)
+
+# Compare
+cat("Modules (min):", length(unique(results_min$colors)), "\n")
+cat("Modules (median):", length(unique(results_median$colors)), "\n")
+cat("Modules (max):", length(unique(results_max$colors)), "\n")
+```
+
+# Understanding Consensus Integration
+
+## Minimum Method ("min")
+
+The minimum method takes the minimum TOM value across all datasets for each feature pair. This is the most **conservative** approach:
+
+- Only preserves relationships that are strong in ALL datasets
+- Reduces false positives
+- May miss dataset-specific modules
+- Use when: You want highly reproducible modules
+
+## Maximum Method ("max")
+
+The maximum method takes the maximum TOM value across all datasets. This is the most **liberal** approach:
+
+- Preserves relationships that are strong in ANY dataset
+- Captures dataset-specific patterns
+- May include more false positives
+- Use when: Dataset-specific modules are of interest
+
+## Quantile Methods
+
+Quantile methods provide a balance:
+
+- **"quantile.0.25"**: 25th percentile - moderately conservative
+- **"quantile.0.5"**: Median - balanced approach (recommended default)
+- **"quantile.0.75"**: 75th percentile - moderately liberal
+
+# Advanced Features
+
+## Automatic Soft Power Selection
+
+If you don't specify soft powers, they will be determined automatically:
+
+```{r auto_power, eval=FALSE}
+results_auto <- netboost_consensus(
+    datan_list = datan_list,
+    soft_power = NULL,  # Automatic
+    consensus_method = "quantile.0.5"
+)
+
+cat("Automatically selected powers:", results_auto$soft_power, "\n")
+```
+
+## Different Soft Powers per Dataset
+
+Different data types may require different soft powers:
+
+```{r different_powers, eval=FALSE}
+# Example: methylation and expression
+results_multi <- netboost_consensus(
+    datan_list = list(meth_data, expr_data),
+    soft_power = c(6L, 3L),  # Higher for methylation, lower for expression
+    consensus_method = "quantile.0.5"
+)
+```
+
+## Choosing Reference Dataset
+
+Module eigengenes are calculated on one reference dataset:
+
+```{r reference_data, eval=FALSE}
+results_ref <- netboost_consensus(
+    datan_list = datan_list,
+    reference_data = 2,  # Use second dataset for eigengenes
+    consensus_method = "min"
+)
+```
+
+# Visualizing Results
+
+The standard netboost plotting functions work with consensus results:
+
+```{r plot_results, eval=FALSE}
+# Plot dendrograms with module colors
+nb_plot_dendro(
+    nb_summary = results,
+    labels = FALSE,
+    colorsrandom = TRUE
+)
+```
+
+# Use Cases
+
+## Multi-Tissue Analysis
+
+```{r multitissue, eval=FALSE}
+# Identify modules conserved across tissues
+tissue_list <- list(
+    brain = brain_data,
+    liver = liver_data,
+    heart = heart_data
+)
+
+results <- netboost_consensus(
+    datan_list = tissue_list,
+    consensus_method = "min",  # Conserved modules only
+    min_cluster_size = 20L
+)
+```
+
+## Batch Effect Investigation
+
+```{r batch, eval=FALSE}
+# Find robust modules despite batch effects
+batch_list <- list(
+    batch1 = data_batch1,
+    batch2 = data_batch2
+)
+
+results <- netboost_consensus(
+    datan_list = batch_list,
+    consensus_method = "quantile.0.75",  # Somewhat liberal
+    min_cluster_size = 15L
+)
+```
+
+## Multi-Omics Integration
+
+```{r multiomics, eval=FALSE}
+# Integrate different omics layers
+omics_list <- list(
+    methylation = meth_data,
+    expression = expr_data,
+    proteomics = prot_data
+)
+
+results <- netboost_consensus(
+    datan_list = omics_list,
+    soft_power = c(6L, 3L, 4L),  # Customized per data type
+    consensus_method = "quantile.0.5",
+    reference_data = 2  # Use expression for eigengenes
+)
+```
+
+# Performance Considerations
+
+## Memory Usage
+
+Consensus clustering uses memory efficiently:
+
+- Filtering reduces the number of edges considered
+- Only union of edges is kept in final filter
+- Much more scalable than full correlation matrices
+
+## Computation Time
+
+Tips for faster analysis:
+
+```{r performance, eval=FALSE}
+# Use multiple cores
+results <- netboost_consensus(
+    datan_list = datan_list,
+    cores = 4L  # Adjust based on your system
+)
+
+# Reduce boosting steps for exploration
+results <- netboost_consensus(
+    datan_list = datan_list,
+    stepno = 10L  # Faster, but less refined
+)
+```
+
+# Interpreting Results
+
+## Module Quality
+
+Check module eigengene variance explained:
+
+```{r module_quality, eval=FALSE}
+# Variance explained by first PC of each module
+var_exp <- results$var_explained[1, ]
+print(var_exp)
+
+# Identify high-quality modules
+high_quality <- names(var_exp[var_exp > 0.5])
+```
+
+## Module Membership
+
+```{r module_membership, eval=FALSE}
+# Get features in a specific module
+module_3_features <- names(results$colors[results$colors == 3])
+print(module_3_features)
+
+# Module sizes
+module_sizes <- table(results$colors)
+print(module_sizes)
+```
+
+## Consensus Statistics
+
+```{r consensus_stats, eval=FALSE}
+# Number of edges per dataset
+cat("Individual filter sizes:\n")
+for (i in seq_along(results$individual_filters)) {
+    cat("Dataset", i, ":", nrow(results$individual_filters[[i]]), "edges\n")
+}
+
+# Union of edges
+cat("\nConsensus filter:", nrow(results$consensus_filter), "edges\n")
+```
+
+# Session Info
+
+```{r session_info}
+sessionInfo()
+```

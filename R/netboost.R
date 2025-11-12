@@ -2197,8 +2197,28 @@ netboost_consensus <-
         # Step 3: Create unified edge list (union of all edges)
         if (verbose) message("Netboost Consensus: Creating unified edge list.")
         
-        all_filters <- do.call(rbind, filter_list)
-        consensus_filter <- unique(all_filters)
+        # Convert filter indices to feature names for proper edge matching
+        filter_with_names <- list()
+        for (i in seq_along(datan_list)) {
+            feature_names <- colnames(datan_list[[i]])
+            filter_with_names[[i]] <- data.frame(
+                feature1 = feature_names[filter_list[[i]][,1]],
+                feature2 = feature_names[filter_list[[i]][,2]],
+                stringsAsFactors = FALSE
+            )
+        }
+        
+        # Combine all filters and get unique edges by feature names
+        all_filters_named <- do.call(rbind, filter_with_names)
+        unique_edges_named <- unique(all_filters_named)
+        
+        # Convert back to indices using reference dataset column names
+        ref_feature_names <- colnames(datan_list[[reference_data]])
+        consensus_filter <- matrix(0, nrow = nrow(unique_edges_named), ncol = 2)
+        consensus_filter[,1] <- match(unique_edges_named$feature1, ref_feature_names)
+        consensus_filter[,2] <- match(unique_edges_named$feature2, ref_feature_names)
+        
+        # Sort for consistency
         consensus_filter <- consensus_filter[order(consensus_filter[,1], 
                                                      consensus_filter[,2]), , 
                                               drop = FALSE]
@@ -2206,6 +2226,12 @@ netboost_consensus <-
         if (verbose) {
             message(paste0("  - Total unique edges across all datasets: ",
                            nrow(consensus_filter)))
+            
+            # Calculate overlap statistics
+            n_edges <- sapply(filter_list, nrow)
+            message(paste0("  - Edge overlap: ", 
+                           sum(n_edges) - nrow(consensus_filter), 
+                           " edges appear in multiple datasets"))
         }
         
         
@@ -2213,18 +2239,26 @@ netboost_consensus <-
         if (verbose) message(paste0("Netboost Consensus: Integrating TOMs using method: ", 
                                      consensus_method))
         
-        # Create a lookup for each dataset's TOM values by edge
+        # Create a lookup for each dataset's TOM values by edge (using feature names)
         TOM_by_edge <- list()
         for (i in seq_along(datan_list)) {
-            edge_key <- paste(filter_list[[i]][,1], filter_list[[i]][,2], sep="_")
+            feature_names <- colnames(datan_list[[i]])
+            # Create edge keys using feature names
+            edge_key <- paste(feature_names[filter_list[[i]][,1]], 
+                            feature_names[filter_list[[i]][,2]], 
+                            sep="_")
             TOM_by_edge[[i]] <- setNames(TOM_list[[i]], edge_key)
         }
         
         # For each edge in consensus filter, collect TOM values from all datasets
         consensus_dist <- numeric(nrow(consensus_filter))
+        ref_feature_names <- colnames(datan_list[[reference_data]])
         
         for (i in 1:nrow(consensus_filter)) {
-            edge_key <- paste(consensus_filter[i,1], consensus_filter[i,2], sep="_")
+            # Create edge key using feature names from reference dataset
+            edge_key <- paste(ref_feature_names[consensus_filter[i,1]], 
+                            ref_feature_names[consensus_filter[i,2]], 
+                            sep="_")
             
             # Collect TOM values from datasets that have this edge
             tom_values <- numeric(0)
@@ -2251,7 +2285,6 @@ netboost_consensus <-
         }
         
         if (verbose) message("Netboost Consensus: Finished TOM integration.")
-        
         # Convert consensus distance vector to matrix
         n_features <- ncol(datan_list[[1]])
         consensus_TOM_matrix <- matrix(0, nrow = n_features, ncol = n_features)
